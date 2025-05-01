@@ -1,0 +1,4 @@
+# .gitignore
+config/config.py
+to-do.txt
+notes-readme.txt
