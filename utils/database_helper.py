@@ -369,15 +369,19 @@ class DatabaseHelper:
         )
     
     def insert_listening_history(self, conn: sqlite3.Connection, history_data: Dict[str, Any], 
-                                track_id: int) -> Optional[int]:
+                               track_id: int) -> Optional[int]:
         """Insert listening history record with better duplicate checking."""
         try:
             cursor = conn.cursor()
 
+            # Convert Unix timestamp to SQLite datetime format
+            from datetime import datetime
+            listened_at_datetime = datetime.fromtimestamp(history_data['listened_at']).strftime('%Y-%m-%d %H:%M:%S')
+
             # Look for exact match on both track_id and timestamp
             cursor.execute(
                 "SELECT history_id FROM user_listening_history WHERE track_id = ? AND listened_at = ?",
-                (track_id, history_data['listened_at'])
+                (track_id, listened_at_datetime)  # Use the converted datetime
             )
             existing = cursor.fetchone()
 
@@ -392,7 +396,7 @@ class DatabaseHelper:
                 VALUES (?, ?, ?)
             ''', (
                 track_id,
-                history_data['listened_at'],
+                listened_at_datetime,  # Use the converted datetime
                 history_data['is_now_playing']
             ))
 
