@@ -116,8 +116,12 @@ class DataCollector:
             The data returned by the API method if successful, or None if an error occurs
         """
         try:
-            method = getattr(self.api, method_name)
-            return method(*args, **kwargs)
+        	method = getattr(self.api, method_name)
+        	result = method(*args, **kwargs)
+        	return result
+        except AttributeError as e:
+            print(f"Method not found: {method_name} - {e}")
+            return None
         except Exception as e:
             print(f"Error calling {method_name}: {e}")
             return None
@@ -232,6 +236,8 @@ class DataCollector:
 
     def get_entity_details(self, entity_type, **kwargs):
         """
+        Modified version to handle improved tag collection.
+
         Fetches detailed information about a specific artist, album, or track from Last.fm.
 
         This method is a unified gateway to retrieve comprehensive details about music entities.
@@ -304,9 +310,10 @@ class DataCollector:
         images = self._extract_images(data.get('image', []))
         data.update(images)
 
-        # Get tags based on entity type
+        # Get tags with enhanced metadata
         tags_method = f"get_{entity_type}_top_tags"
 
+        # Fetch basic tags first
         if entity_type == 'artist':
             tags = self._safe_call(tags_method, kwargs.get('artist_name', ''))
         elif entity_type == 'album':
@@ -325,14 +332,36 @@ class DataCollector:
             tags = None
 
         data['tags'] = []
+
+        # Process tags with enhanced metadata
         if tags:
-            data['tags'] = [
-                {'name': t['name'], 'count': int(t.get('count', 0))} 
-                for t in tags
-            ]
-            # Cache tag info
-            for tag in data['tags']:
-                self.cache['tags'][tag['name']] = {'name': tag['name']}
+            basic_tag_list = [{'name': t['name'], 'count': int(t.get('count', 0) or 0)} 
+                             for t in tags]
+            data['tags'] = basic_tag_list
+
+            # Now enhance each tag with complete metadata
+            enhanced_tags = []
+            for tag in basic_tag_list:
+                tag_name = tag['name']
+                tag_count = tag['count']
+
+                # Get detailed tag info
+                tag_details = self.get_tag_details(tag_name)
+
+                # Store the enhanced tag
+                enhanced_tag = {
+                    'name': tag_name,
+                    'count': tag_count,
+                    'url': tag_details.get('url', ''),
+                    'reach': tag_details.get('reach', 0),
+                    'taggings': tag_details.get('taggings', 0),
+                    'wiki_summary': tag_details.get('wiki_summary', ''),
+                    'wiki_content': tag_details.get('wiki_content', '')
+                }
+                enhanced_tags.append(enhanced_tag)
+
+            # Replace basic tags with enhanced tags
+            data['tags'] = enhanced_tags
 
         # Get entity-specific related data
         if entity_type == 'artist':
@@ -347,7 +376,6 @@ class DataCollector:
                     {'name': a['name'], 'match': float(a.get('match', 0))}
                     for a in similar
                 ]
-
         elif entity_type == 'track':
             similar = self._safe_call(
                 'get_track_similar', 
@@ -369,6 +397,85 @@ class DataCollector:
         # Cache the results
         self.cache.setdefault(f"{entity_type}s", {})[cache_key] = data
         return data
+
+    def get_tag_details(self, tag_name):
+        """
+        Get detailed information about a specific tag.
+        This method fetches complete tag metadata from Last.fm, including
+        URL, reach, taggings count, and wiki content. It uses caching to
+        prevent redundant API calls for the same tag. If URLs are not found, they are constructed. 
+        Parameters:
+        -----------
+        tag_name : str
+            Name of the tag to fetch details for
+        Returns:
+        --------
+        dict
+            Complete tag metadata
+        """
+        # Check if tag details are already in cache
+        if tag_name in self.cache.get('tags', {}):
+            return self.cache['tags'][tag_name]
+
+        # Fetch detailed tag information from API
+        tag_info = self._safe_call('get_tag_info', tag_name)
+
+        # Process the tag info
+        if tag_info and 'tag' in tag_info:
+            tag_data = tag_info['tag']
+
+            # Extract tag metadata
+            tag_details = {
+                'name': tag_name,
+                # The URL might be stored differently, or we can construct it
+                'url': tag_data.get('url', '') or f"https://www.last.fm/tag/{tag_name.replace(' ', '+')}",
+                'reach': int(tag_data.get('reach', 0) or 0),
+                'taggings': int(tag_data.get('total', 0) or 0),
+                'wiki_summary': tag_data.get('wiki', {}).get('summary', ''),
+                'wiki_content': tag_data.get('wiki', {}).get('content', '')
+            }
+
+            # Cache the results
+            self.cache.setdefault('tags', {})[tag_name] = tag_details
+            return tag_details
+
+        # If no detailed info found, create a basic entry
+        basic_tag = {'name': tag_name, 'url': '', 'reach': 0, 'taggings': 0, 
+                    'wiki_summary': '', 'wiki_content': ''}
+
+        # Cache this basic tag info to avoid repeated lookups
+        self.cache.setdefault('tags', {})[tag_name] = basic_tag
+        return basic_tag
+
+    def process_entity_tags(self, entity_type, entity_data):
+        """
+        Process and enhance tags for an entity.
+        This method takes the basic tags from an entity response and enhances
+        them with full metadata by calling get_tag_details for each tag.
+        Parameters:
+        -----------
+        entity_type : str
+            Type of entity ('artist', 'album', or 'track')
+        entity_data : dict
+            Entity data containing basic tag information
+        Returns:
+        --------
+        list
+            Enhanced list of tag dictionaries with complete metadata
+        """
+        enhanced_tags = []
+        # Get the basic tags from entity data
+        basic_tags = entity_data.get('tags', [])
+        for tag in basic_tags:
+            tag_name = tag['name']
+            tag_count = int(tag.get('count', 0) or 0)  # Handle None or empty string
+            # Get detailed tag info with caching
+            tag_details = self.get_tag_details(tag_name)
+            # Add the count from the entity-specific tag relationship
+            enhanced_tag = tag_details.copy()
+            enhanced_tag['count'] = tag_count
+            enhanced_tags.append(enhanced_tag)
+        return enhanced_tags
 
     def collect_library_data(
         self, 
@@ -477,9 +584,18 @@ class DataCollector:
                     'count': tag.get('count', 0)
                 })
                 
-                # Add tag if new
+                
+                # Add tag if new with all metadata
                 if tag['name'] not in [t.get('name') for t in result['tags']]:
-                    result['tags'].append({'name': tag['name']})
+                    # Create a complete tag entry with all metadata
+                    result['tags'].append({
+                        'name': tag['name'],
+                        'url': tag.get('url', ''),
+                        'reach': tag.get('reach', 0),
+                        'taggings': tag.get('taggings', 0),
+                        'wiki_summary': tag.get('wiki_summary', ''),
+                        'wiki_content': tag.get('wiki_content', '')
+                    })
 
             # Add similar artists
             for similar in artist_data.get('similar_artists', []):
@@ -528,6 +644,17 @@ class DataCollector:
                     'tag_name': tag['name'],
                     'count': tag.get('count', 0)
                 })
+                # Add tag if new 
+                if tag['name'] not in [t.get('name') for t in result['tags']]:
+                    # Create a complete tag entry with all metadata
+                    result['tags'].append({
+                        'name': tag['name'],
+                        'url': tag.get('url', ''),
+                        'reach': tag.get('reach', 0),
+                        'taggings': tag.get('taggings', 0),
+                        'wiki_summary': tag.get('wiki_summary', ''),
+                        'wiki_content': tag.get('wiki_content', '')
+                    })
 
         # Get unique tracks
         unique_tracks = {
@@ -566,6 +693,17 @@ class DataCollector:
                     'tag_name': tag['name'],
                     'count': tag.get('count', 0)
                 })
+                # Add tag if new 
+                if tag['name'] not in [t.get('name') for t in result['tags']]:
+                    # Create a complete tag entry with all metadata
+                    result['tags'].append({
+                        'name': tag['name'],
+                        'url': tag.get('url', ''),
+                        'reach': tag.get('reach', 0),
+                        'taggings': tag.get('taggings', 0),
+                        'wiki_summary': tag.get('wiki_summary', ''),
+                        'wiki_content': tag.get('wiki_content', '')
+                    })
 
             # Add similar tracks
             for similar in track_data.get('similar_tracks', []):
