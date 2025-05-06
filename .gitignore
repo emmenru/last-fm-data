@@ -2,3 +2,7 @@
 config/config.py
 to-do.txt
 notes-readme.txt
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
