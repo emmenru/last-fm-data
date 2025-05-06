@@ -44,11 +44,15 @@ class DataCollector:
 
             Empty strings are used for any missing image sizes.
         """
+        # Default empty image dictionary
+        result = {'image_small': '', 'image_medium': '', 'image_large': ''}
+
         if not images:
-            return {'image_small': '', 'image_medium': '', 'image_large': ''}
-        
-        result = {}
+            return result
+
+        # Process each image by size
         for img in images:
+            # Only process images with actual URLs
             if img.get('#text'):
                 if img.get('size') == 'small':
                     result['image_small'] = img.get('#text', '')
@@ -56,14 +60,39 @@ class DataCollector:
                     result['image_medium'] = img.get('#text', '')
                 elif img.get('size') == 'large':
                     result['image_large'] = img.get('#text', '')
-        
-        # Ensure all fields exist
-        for size in ['image_small', 'image_medium', 'image_large']:
-            if size not in result:
-                result[size] = ''
-                
-        return result
 
+        # User-Agent to improve connection reliability
+        headers = {'User-Agent': 'LastFM ETL Pipeline/1.0'}
+        timeout = 5  # Longer timeout for image validation
+
+        # Check each image size independently
+        for size in ['small', 'medium', 'large']:
+            if result[f'image_{size}']:
+                try:
+                    response = requests.head(
+                        result[f'image_{size}'], 
+                        timeout=timeout, 
+                        headers=headers
+                    )
+                    # If this size doesn't work, try to find a working alternative
+                    if response.status_code != 200:
+                        # Try other sizes as fallbacks
+                        for alt_size in ['medium', 'small', 'large']:
+                            if alt_size != size and result[f'image_{alt_size}']:
+                                alt_response = requests.head(
+                                    result[f'image_{alt_size}'], 
+                                    timeout=timeout, 
+                                    headers=headers
+                                )
+                                if alt_response.status_code == 200:
+                                    result[f'image_{size}'] = result[f'image_{alt_size}']
+                                    break
+                except Exception:
+                    # On error, keep the URLs as they are - they might still work
+                    pass
+
+        return result
+    
     def _safe_call(self, method_name, *args, **kwargs):
         """
         Safely call an API method with comprehensive error handling.
@@ -92,7 +121,7 @@ class DataCollector:
         except Exception as e:
             print(f"Error calling {method_name}: {e}")
             return None
-
+    
     def get_user_recent_tracks(self, limit=50, pages=1):
         """
         Fetches the user's recently played tracks from Last.fm.

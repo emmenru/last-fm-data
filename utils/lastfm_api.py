@@ -1,4 +1,5 @@
 import time 
+import logging 
 from typing import Dict, List, Any, Optional
 import requests
 
@@ -19,17 +20,19 @@ class LastFMAPI:
         self.base_url = "http://ws.audioscrobbler.com/2.0/"
         self.last_request_time = 0  # For improved rate limiting
 
-    def _make_request(self, method: str, params: Dict) -> Optional[Dict]:
+    def _make_request(self, method: str, params: Dict, timeout: int = 5) -> Optional[Dict]:
         """
         Make the actual HTTP request to the Last.fm API with adaptive rate limiting.
-        
+
         Parameters:
         -----------
         method : str
             Last.fm API method name
         params : dict
             Parameters to send with the request
-            
+        timeout : int, default=5
+            Timeout in seconds for the request
+
         Returns:
         --------
         dict or None
@@ -46,22 +49,47 @@ class LastFMAPI:
         elapsed = time.time() - self.last_request_time
         if elapsed < 0.2:  # Minimum 5 requests per second
             time.sleep(0.2 - elapsed)
-        
+
         try:
-            response = requests.get(self.base_url, params=params)
+            # Add User-Agent header to improve connection reliability
+            headers = {'User-Agent': 'LastFM ETL Pipeline/1.0'}
+
+            # Log the request start time
+            start_time = time.time()
+
+            # Use 5-second timeout
+            response = requests.get(self.base_url, params=params, headers=headers, timeout=timeout)
+
+            # Calculate request duration
+            duration = time.time() - start_time
+
+            # Log duration for monitoring
+            if duration > 3:  # Log if request takes more than 3 seconds
+                logging.info(f"Slow request to {method}: {duration:.2f} seconds")
+            elif duration > 1:  # Also log moderately slow requests
+                logging.debug(f"Moderate request to {method}: {duration:.2f} seconds")
+
             response.raise_for_status()
             self.last_request_time = time.time()
             return response.json()
+        except requests.exceptions.Timeout as e:
+            # Log timeout errors specifically
+            logging.warning(f"Timeout error for {method} after {timeout} seconds: {e}")
+            return None
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:
                 # Common case: resource not found
-                print(f"Error getting {method}: {e}")
+                logging.info(f"Resource not found for {method}: {e}")
                 return None
-            raise  # Re-raise other HTTP errors
+            else:
+                # Log other HTTP errors
+                logging.error(f"HTTP error for {method}: {e}")
+                raise
         except requests.exceptions.RequestException as e:
-            print(f"Request failed for {method}: {e}")
+            # Log general request errors
+            logging.error(f"Request failed for {method}: {e}")
             return None
-        
+    
     def _extract_data(self, response: Optional[Dict], result_path: List[str]) -> Any:
         """
         Extract specific data from the nested response.
