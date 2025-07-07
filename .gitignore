@@ -1,6 +1,7 @@
 # .gitignore
 config/config.py
 to-do.txt
+prompt.txt
 notes-readme.txt
 __pycache__/
 **/__pycache__/
