@@ -21,24 +21,11 @@ except ImportError:
 # CONSTANTS
 # =============================================================================
 
+# Improved intent labels for better zero-shot classification
 INTENT_LABELS = [
-    "tell me biographical information about a specific artist or band",
-    "recommend new music for me to discover", 
-    "show me MY personal listening statistics and data"
-]
-
-STATS_KEYWORDS = ["my top", "my most", "my listening", "what did i listen"]
-TIME_PATTERN = r'\b(january|february|march|april|may|june|july|august|september|october|november|december|last month|this month|last year|this year|in 20\d{2})\b'
-
-GENRE_PATTERNS = {
-    'chill': ['relax', 'calm', 'chill', 'ambient'],
-    'jazz': ['jazz', 'blues'],
-    'rock': ['rock', 'metal'],
-    'electronic': ['electronic', 'techno', 'edm']
-}
-
-ARTIST_PATTERNS = [
-    r'tell me about (.+)', r'who is (.+)\?', r'about (.+)', r'information about (.+)'
+    "provide biographical information, background details, or career information about a specific named artist, band, or musician",
+    "recommend new music to discover, suggest similar artists to explore, find music recommendations, or get music suggestions", 
+    "display my existing personal listening statistics, show my top played artists or songs from my listening history"
 ]
 
 
@@ -82,46 +69,47 @@ class ZeroShotMusicClassifier:
             return "Zero-shot classifier: Unable to process this request type."
             
         message = prompt_text.split("Request: ")[-1].split("\n")[0]
+        query_lower = message.lower()
         
-        # Check for statistics keywords first
-        if (any(keyword in message.lower() for keyword in STATS_KEYWORDS) or
-            re.search(TIME_PATTERN, message, re.IGNORECASE)):
-            print("  🎯 Keyword override: detected statistics request")
-            return "listening_stats"
+        # Pattern-based classification with compact lookup
+        patterns = {
+            "listening_stats": ["my top", "my most", "show me my", "my listening", "my statistics", "my personal", "my history"],
+            "artist_info": ["tell me about", "who is", "information about", "biography for"],
+            "recommend_music": ["recommend", "suggest", "discover", "find artists", "similar to", "music like", "artists like"]
+        }
         
-        # Use zero-shot classification
+        # Check patterns with special handling for artist_info (needs artist keywords)
+        for intent, phrases in patterns.items():
+            if any(phrase in query_lower for phrase in phrases):
+                if intent == "artist_info":
+                    # Artist info needs additional artist-related keywords
+                    if any(word in query_lower for word in ["artist", "band", "musician"]):
+                        print(f"  Pattern override: detected {intent.replace('_', ' ')} request")
+                        return intent
+                else:
+                    print(f"  Pattern override: detected {intent.replace('_', ' ')} request")
+                    return intent
+        
+        # Use zero-shot classification for other cases
         result = self.classifier(message, INTENT_LABELS)
         
         # Debug output
-        print(f"  🔍 Message: '{message}'")
+        print(f"  Message: '{message}'")
         for i, (label, score) in enumerate(zip(result['labels'], result['scores']), 1):
-            print(f"  🔍 Label {i}: '{label}' (score: {score:.3f})")
+            print(f"  Label {i}: '{label[:50]}...' (score: {score:.3f})")
         
-        # Map result to intent
-        top_label = result['labels'][0]
-        if "biographical information about" in top_label:
+        # Map result to intent based on label content
+        top_label = result['labels'][0].lower()
+        
+        if "biographical" in top_label or ("information" in top_label and "specific" in top_label):
             return "artist_info"
-        elif "MY personal listening" in top_label:
+        elif "existing" in top_label or ("display my" in top_label and "listening" in top_label):
             return "listening_stats"
-        else:
+        elif "recommend" in top_label or "suggest" in top_label or "discover" in top_label or "explore" in top_label:
             return "recommend_music"
-
-
-class SimpleLLM:
-    def invoke(self, prompt_text: str) -> str:
-        if "classify this music request" not in prompt_text.lower():
-            return "Fallback classifier: Unable to process this request type."
-            
-        message = prompt_text.split("Request: ")[-1].split("\n")[0].lower()
-        
-        stats_pattern = r'\b(my top|statistics|listening habits|most played|january|february|march|april|may|june|july|august|september|october|november|december|last month|this month|last year|this year|in 20\d{2})\b'
-        if re.search(stats_pattern, message):
-            return "listening_stats"
-        
-        if any(word in message for word in ["tell me about", "who is", "what is", "info"]):
-            return "artist_info"
-        
-        return "recommend_music"
+        else:
+            # Final fallback - default to recommendation for ambiguous cases
+            return "recommend_music"
 
 
 class SimpleTextGenerator:
@@ -167,7 +155,7 @@ class SQLGenerator:
     def _get_cached_or_generate(self, cache_key: str, generator_func) -> Tuple[str, Dict[str, Any]]:
         if cache_key in self.cache:
             sql, metadata = self.cache[cache_key]
-            print(f"  💾 Using cached query: {metadata.get('query_type', 'unknown')}")
+            print(f"  Using cached query: {metadata.get('query_type', 'unknown')}")
             return sql, metadata
         
         sql, metadata = generator_func()
@@ -182,11 +170,21 @@ class SQLGenerator:
             message = user_input.lower()
             artist_name = None
             
-            for pattern in ARTIST_PATTERNS:
-                match = re.search(pattern, message)
+            # More flexible artist name extraction
+            patterns = [
+                r'(?:tell me about|about|who is|information about)\s+(.+?)(?:\?|$)',
+                r'(?:artist|band|musician)\s+(.+?)(?:\?|$)',
+                r'(.+?)(?:\s+(?:artist|band|musician))?(?:\?|$)'
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, message, re.IGNORECASE)
                 if match:
-                    artist_name = match.group(1).strip()
-                    break
+                    candidate = match.group(1).strip()
+                    # Filter out common stop words
+                    if candidate and candidate not in ['the', 'a', 'an', 'is', 'are', 'was', 'were']:
+                        artist_name = candidate
+                        break
             
             if artist_name:
                 sql = f"SELECT name, bio_summary, listeners, playcount FROM artists WHERE name LIKE '%{artist_name}%' LIMIT 5"
@@ -205,21 +203,46 @@ class SQLGenerator:
         
         def _generate():
             message = user_input.lower()
-            detected_genre = "general"
             
-            for genre, keywords in GENRE_PATTERNS.items():
-                if any(word in message for word in keywords):
-                    detected_genre = genre
-                    sql = f"SELECT a.name, a.playcount FROM artists a JOIN artist_tags at ON a.artist_id = at.artist_id JOIN tags t ON at.tag_id = t.tag_id WHERE t.name LIKE '%{genre}%' ORDER BY a.playcount DESC LIMIT 5"
-                    break
+            # Extract artist name from recommendation request
+            artist_name = None
+            patterns = [
+                r'(?:similar to|like|artists like|music like|bands like)\s+(.+?)(?:\?|$)',
+                r'(?:find|recommend|suggest).*(?:similar.*to|like)\s+(.+?)(?:\?|$)',
+                r'(?:based on|inspired by)\s+(.+?)(?:\?|$)'
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, message, re.IGNORECASE)
+                if match:
+                    candidate = match.group(1).strip()
+                    # Clean up common words
+                    candidate = re.sub(r'\b(the artist|artist|band|musician)\b', '', candidate, flags=re.IGNORECASE).strip()
+                    if candidate:
+                        artist_name = candidate
+                        break
+            
+            if artist_name:
+                # Use similarity table to find similar artists
+                sql = (f"SELECT a2.name as similar_artist, ars.match_score "
+                       f"FROM artists a1 "
+                       f"JOIN artist_similar ars ON a1.artist_id = ars.artist_id "
+                       f"JOIN artists a2 ON ars.similar_artist_id = a2.artist_id "
+                       f"WHERE a1.name LIKE '%{artist_name}%' "
+                       f"ORDER BY ars.match_score DESC LIMIT 10")
+                metadata = {
+                    "query_type": "similarity_recommendation",
+                    "target_artist": artist_name,
+                    "timestamp": datetime.now().isoformat()
+                }
             else:
-                sql = "SELECT name, playcount FROM artists ORDER BY playcount DESC LIMIT 5"
+                # Fallback to popular artists if no specific artist mentioned
+                sql = "SELECT name, playcount FROM artists ORDER BY playcount DESC LIMIT 10"
+                metadata = {
+                    "query_type": "popular_recommendation",
+                    "timestamp": datetime.now().isoformat()
+                }
             
-            metadata = {
-                "detected_genre": detected_genre,
-                "query_type": "recommendation",
-                "timestamp": datetime.now().isoformat()
-            }
             return sql, metadata
         
         return self._get_cached_or_generate(cache_key, _generate)
@@ -230,20 +253,30 @@ class SQLGenerator:
         def _generate():
             message = user_input.lower()
             
-            if "top" in message and "artist" in message:
+            # Enhanced pattern matching for statistics
+            if any(word in message for word in ["top", "most played", "favorite"]) and any(word in message for word in ["artist", "artists"]):
                 sql = "SELECT a.name, uta.playcount FROM user_top_artists uta JOIN artists a ON uta.artist_id = a.artist_id ORDER BY uta.playcount DESC LIMIT 10"
                 stats_type = "top_artists"
-            elif "top" in message and ("track" in message or "song" in message):
+            elif any(word in message for word in ["top", "most played", "favorite"]) and any(word in message for word in ["track", "song", "songs", "tracks"]):
                 sql = "SELECT t.name, utt.playcount FROM user_top_tracks utt JOIN tracks t ON utt.track_id = t.track_id ORDER BY utt.playcount DESC LIMIT 10"
                 stats_type = "top_tracks"
-            elif ("most played" in message and "song" in message) or ("played song" in message):
-                sql = "SELECT t.name, utt.playcount FROM user_top_tracks utt JOIN tracks t ON utt.track_id = t.track_id ORDER BY utt.playcount DESC LIMIT 10"
-                stats_type = "most_played_songs"
-            elif "march" in message:
-                sql = "SELECT a.name, COUNT(*) as listens FROM user_listening_history ulh JOIN tracks t ON ulh.track_id = t.track_id JOIN artists a ON t.artist_id = a.artist_id WHERE strftime('%m', ulh.listened_at) = '03' GROUP BY a.artist_id ORDER BY listens DESC LIMIT 10"
-                stats_type = "march_listening"
+            elif any(month in message for month in ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]):
+                # Extract month number for SQL query
+                month_map = {"january": "01", "february": "02", "march": "03", "april": "04", 
+                           "may": "05", "june": "06", "july": "07", "august": "08",
+                           "september": "09", "october": "10", "november": "11", "december": "12"}
+                month_num = "03"  # Default to March as example
+                for month_name, num in month_map.items():
+                    if month_name in message:
+                        month_num = num
+                        break
+                sql = f"SELECT a.name, COUNT(*) as listens FROM user_listening_history ulh JOIN tracks t ON ulh.track_id = t.track_id JOIN artists a ON t.artist_id = a.artist_id WHERE strftime('%m', ulh.listened_at) = '{month_num}' GROUP BY a.artist_id ORDER BY listens DESC LIMIT 10"
+                stats_type = f"monthly_listening_{month_num}"
+            elif any(word in message for word in ["listening", "history", "played", "statistics", "stats"]):
+                sql = "SELECT a.name, uta.playcount FROM user_top_artists uta JOIN artists a ON uta.artist_id = a.artist_id ORDER BY uta.playcount DESC LIMIT 10"
+                stats_type = "general_stats"
             else:
-                sql = "SELECT a.name, uta.playcount FROM user_top_artists uta JOIN artists a ON uta.artist_id = a.artist_id ORDER BY uta.playcount DESC LIMIT 5"
+                sql = "SELECT a.name, uta.playcount FROM user_top_artists uta JOIN artists a ON uta.artist_id = a.artist_id ORDER BY uta.playcount DESC LIMIT 10"
                 stats_type = "default_top_artists"
             
             metadata = {
@@ -265,9 +298,24 @@ class ResponseGenerator:
         self.response_history = []
         self.user_preferences = {}
     
+    def _get_empty_response(self, intent: str) -> str:
+        responses = {
+            "artist_info": "I couldn't find information about that artist in your listening history.",
+            "listening_stats": "I couldn't find any listening statistics for that request.",
+        }
+        return responses.get(intent, "I couldn't find any music matching your request.")
+    
     def generate_response(self, state: AgentState) -> str:
         if not state["results"]:
-            response = self._get_empty_response(state["intent"])
+            # Special handling for similarity requests with no results
+            if (state["intent"] == "recommend_music" and 
+                state.get("query_metadata", {}).get("query_type") == "similarity_recommendation"):
+                target_artist = state.get("query_metadata", {}).get("target_artist", "that artist")
+                print(f"  No similarity data found for '{target_artist}' in local database")
+                print(f"  Would need to search Last.fm API for similar artists to '{target_artist}'")
+                return f"No similarity data found for {target_artist} in your local library. This would require searching the Last.fm API for similar artists."
+            else:
+                response = self._get_empty_response(state["intent"])
         else:
             unique_results = self._remove_duplicates(state["results"])
             results_text = self._format_results(unique_results, state["intent"])
@@ -287,13 +335,6 @@ class ResponseGenerator:
         self._update_preferences(state["intent"], state.get("query_metadata", {}))
         return response
     
-    def _get_empty_response(self, intent: str) -> str:
-        responses = {
-            "artist_info": "I couldn't find information about that artist in your listening history.",
-            "listening_stats": "I couldn't find any listening statistics for that request.",
-        }
-        return responses.get(intent, "I couldn't find any music matching your request.")
-    
     def _remove_duplicates(self, results: List[Dict]) -> List[Dict]:
         seen_names = set()
         unique_results = []
@@ -308,14 +349,30 @@ class ResponseGenerator:
         if intent == "artist_info":
             result = results[0]
             name = result.get('name', 'Unknown')
+            bio_summary = result.get('bio_summary', '')
             playcount = result.get('playcount', 0)
-            return f"{name} with {playcount:,} plays" if playcount else name
+            
+            # Include bio information if available
+            if bio_summary and len(bio_summary.strip()) > 0:
+                # Truncate bio if too long for response generation
+                bio_text = bio_summary[:200] + "..." if len(bio_summary) > 200 else bio_summary
+                return f"{name}: {bio_text} ({playcount:,} plays)" if playcount else f"{name}: {bio_text}"
+            else:
+                return f"{name} with {playcount:,} plays" if playcount else name
         
+        # For recommendations and stats, format differently
         formatted = []
         for result in results[:3]:
-            name = result.get('name', 'Unknown')
-            count = result.get('playcount', result.get('listens', 0))
-            formatted.append(f"{name} ({count:,} plays)" if count else name)
+            # Handle similarity results (have 'similar_artist' field)
+            if 'similar_artist' in result:
+                name = result.get('similar_artist', 'Unknown')
+                score = result.get('match_score', 0)
+                formatted.append(f"{name} (similarity: {score:.2f})" if score else name)
+            else:
+                # Regular results
+                name = result.get('name', 'Unknown')
+                count = result.get('playcount', result.get('listens', 0))
+                formatted.append(f"{name} ({count:,} plays)" if count else name)
         return ", ".join(formatted)
     
     def _create_prompt(self, intent: str, results_text: str) -> str:
@@ -341,11 +398,6 @@ class ResponseGenerator:
             self.user_preferences[intent] = {"count": 0, "patterns": {}}
         
         self.user_preferences[intent]["count"] += 1
-        
-        if intent == "recommend_music" and "detected_genre" in query_metadata:
-            genre = query_metadata["detected_genre"]
-            patterns = self.user_preferences[intent]["patterns"]
-            patterns[genre] = patterns.get(genre, 0) + 1
     
     def get_user_preferences(self) -> Dict[str, Any]:
         return self.user_preferences
@@ -357,8 +409,8 @@ class ResponseGenerator:
 
 def setup_llm() -> Tuple[Any, SimpleTextGenerator]:
     if not TRANSFORMERS_AVAILABLE:
-        print("⚠️ Transformers not available, using rule-based fallback")
-        return SimpleLLM(), SimpleLLM()
+        print("Transformers not available")
+        raise ImportError("Transformers library is required")
     
     try:
         print("Loading models...")
@@ -367,12 +419,12 @@ def setup_llm() -> Tuple[Any, SimpleTextGenerator]:
         
         generator = pipeline("text-generation", model="distilgpt2", max_length=150, pad_token_id=50256)
         generation_llm = SimpleTextGenerator(generator)
-        print("✅ Models loaded successfully")
+        print("Models loaded successfully")
         
         return classification_llm, generation_llm
     except Exception as e:
-        print(f"⚠️ Model loading failed: {e}. Using fallback.")
-        return SimpleLLM(), SimpleLLM()
+        print(f"Model loading failed: {e}")
+        raise RuntimeError(f"Failed to load models: {e}")
 
 
 # =============================================================================
@@ -391,24 +443,24 @@ class MusicDiscoveryAgent:
     def _create_graph(self) -> Any:
         graph = StateGraph(AgentState)
         
-        # Add nodes
+        # Add nodes with more descriptive names
         graph.add_node("classify_intent", self._classify_intent)
-        graph.add_node("artist_sql", self._generate_artist_sql)
-        graph.add_node("recommendation_sql", self._generate_recommendation_sql)
-        graph.add_node("stats_sql", self._generate_stats_sql)
-        graph.add_node("execute_query", self._execute_query)
+        graph.add_node("get_bio_info", self._generate_artist_sql)
+        graph.add_node("get_recommendation", self._generate_recommendation_sql)
+        graph.add_node("describe_my_listening", self._generate_stats_sql)
+        graph.add_node("execute_sql_query", self._execute_query)
         graph.add_node("generate_response", self._generate_response)
         
-        # Add edges
+        # Add edges with updated node names
         graph.add_edge(START, "classify_intent")
         graph.add_conditional_edges(
             "classify_intent", self._route_sql_type,
-            {"artist_sql": "artist_sql", "recommendation_sql": "recommendation_sql", "stats_sql": "stats_sql"}
+            {"get_bio_info": "get_bio_info", "get_recommendation": "get_recommendation", "describe_my_listening": "describe_my_listening"}
         )
-        graph.add_edge("artist_sql", "execute_query")
-        graph.add_edge("recommendation_sql", "execute_query")
-        graph.add_edge("stats_sql", "execute_query")
-        graph.add_edge("execute_query", "generate_response")
+        graph.add_edge("get_bio_info", "execute_sql_query")
+        graph.add_edge("get_recommendation", "execute_sql_query")
+        graph.add_edge("describe_my_listening", "execute_sql_query")
+        graph.add_edge("execute_sql_query", "generate_response")
         graph.add_edge("generate_response", END)
         
         return graph.compile()
@@ -423,8 +475,8 @@ class MusicDiscoveryAgent:
         return state
     
     def _route_sql_type(self, state: AgentState) -> str:
-        routing = {"artist_info": "artist_sql", "listening_stats": "stats_sql"}
-        return routing.get(state["intent"], "recommendation_sql")
+        routing = {"artist_info": "get_bio_info", "listening_stats": "describe_my_listening"}
+        return routing.get(state["intent"], "get_recommendation")
     
     def _generate_artist_sql(self, state: AgentState) -> AgentState:
         sql, metadata = self.sql_generator.generate_artist_sql(state["user_input"])
@@ -496,7 +548,7 @@ class MusicDiscoveryAgent:
         self.session_history = []
         self.sql_generator = SQLGenerator()
         self.response_generator = ResponseGenerator(self.generation_llm)
-        print("🧹 Session cleared")
+        print("Session cleared")
 
 
 # =============================================================================
@@ -504,48 +556,32 @@ class MusicDiscoveryAgent:
 # =============================================================================
 
 def create_music_agent(db_path: str) -> MusicDiscoveryAgent:
+    """Create a music discovery agent with database connection."""
     return MusicDiscoveryAgent(DatabaseManager(db_path))
 
 
-def query_music_agent(user_input: str, db_manager: DatabaseManager) -> Dict[str, Any]:
-    agent = MusicDiscoveryAgent(db_manager)
-    return agent.process_query(user_input)
-
-
-def run_music_chatbot(db_path: str) -> None:
-    agent = create_music_agent(db_path)
-    print("🎵 Music Discovery AI Ready! Type 'exit' to quit.")
-    
-    while True:
-        user_input = input("\nYou: ").strip()
-        if user_input.lower() in ['exit', 'quit']:
-            break
-        elif user_input.lower() == 'stats':
-            stats = agent.get_session_stats()
-            print(f"📊 Queries: {stats['total_queries']}, Cache: {stats['sql_cache_stats']}")
-            continue
-        elif user_input.lower() == 'clear':
-            agent.clear_session()
-            continue
-        
-        result = agent.process_query(user_input)
-        print(f"🎵 {result['response']}")
-
-
 def test_agent(db_path: str) -> None:
+    """Test the agent with the three main intent cases."""
     agent = create_music_agent(db_path)
     
+    # Test the three main intents
     test_queries = [
-        "Recommend some relaxing music", "Tell me about Radiohead", "Show me my top 10 artists",
-        "Who is Taylor Swift?", "Find me some jazz music", "What artist did I listen to most in March?",
-        "Show me my most played songs", "Recommend some relaxing music"  # Test caching
+        "Tell me about Radiohead",                    # artist_info
+        "Find artists similar to Radiohead",         # recommend_music  
+        "Show me my top 10 artists"                  # listening_stats
     ]
     
+    print("Testing three main intents:")
     for query in test_queries:
         print(f"\nTesting: {query}")
         result = agent.process_query(query)
-        print(f"Intent: {result['intent']}")
-        print(f"Response: {result['response']}")
+        print(f"  Intent: {result['intent']}")
+        print(f"  SQL: {result['sql_query']}")
+        print(f"  Results: {len(result['results'])} found")
+        print(f"  Response: {result['response']}")
     
+    # Show final stats
     stats = agent.get_session_stats()
-    print(f"\n📊 Final Stats: {stats['total_queries']} queries, {stats['sql_cache_stats']} cache stats")
+    print(f"\nTest completed: {stats['total_queries']} queries processed")
+    print(f"Cache efficiency: {stats['sql_cache_stats']}")
+    print(f"Intent distribution: {stats['intent_distribution']}")
