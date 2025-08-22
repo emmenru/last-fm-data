@@ -1,54 +1,37 @@
 # utils/music_discovery_helper.py
 """
-Simplified Music Discovery AI Agent - Pattern-Based Classification
-"""
+Music Discovery AI Agent
 
-import sqlite3
+Processes natural language queries about Last.fm music data using a hybrid approach:
+- AI intent classification (SentenceTransformer)
+- Hybrid entity extraction (regex + SentenceTransformer semantic AI)
+- 7-node LangGraph workflow for clean architecture
+
+Supports artist info, listening stats, and music recommendations.
+Example: "Tell me about Radiohead" → artist biography and stats
+"""
 import re
-from typing import TypedDict, List, Dict, Any, Optional, Tuple
+import sqlite3
 from datetime import datetime
+from typing import Dict, List, Any, Optional, Tuple, TypedDict
+
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 from langgraph.graph import StateGraph, START, END
 
-try:
-    from transformers import pipeline
-    TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    TRANSFORMERS_AVAILABLE = False
 
-# =============================================================================
-# CONSTANTS
-# =============================================================================
-
-ARTIST_PATTERNS = [
-    r'(?:tell me about|about|who is|information about)\s+(?:the\s+)?(?:artist|band|musician)\s+([^?.!]+?)(?:[?.!]|$)',
-    r'(?:tell me about|about|who is|information about)\s+([^?.!]+?)(?:\s+(?:artist|band|musician))?(?:[?.!]|$)',
-    r'(?:the\s+)?(?:artist|band|musician)\s+([^?.!]+?)(?:[?.!]|$)',
-    r'biography(?:\s+for|\s+of)?\s+([^?.!]+?)(?:[?.!]|$)'
-]
-
-SIMILARITY_PATTERNS = [
-    r'(?:similar to|like|artists like|music like|bands like)\s+([^?.!]+?)(?:[?.!]|$)',
-    r'(?:find|recommend|suggest).*(?:similar.*to|like)\s+([^?.!]+?)(?:[?.!]|$)',
-    r'(?:based on|inspired by)\s+([^?.!]+?)(?:[?.!]|$)'
-]
-
-CONTENT_TYPE_KEYWORDS = {
-    "tracks": ["song", "songs", "track", "tracks"],
-    "albums": ["album", "albums"]
+# Constants
+TIME_DISPLAY = {
+    "7day": "past week", "1month": "past month", "3month": "past 3 months", 
+    "6month": "past 6 months", "12month": "past year", "overall": "all time"
 }
 
-TIME_PERIODS = ["7day", "1month", "3month", "6month", "overall"]
+TIME_PERIODS = ["7day", "1month", "3month", "6month", "12month", "overall"]
 
-CLEANUP_WORDS = {
-    "artist": r'\b(the|a|an|is|are|was|were|artist|artists|band|bands|musician|musicians)\b',
-    "similarity": r'\b(the|a|an|artist|artists|band|bands|musician|musicians)\b'
-}
-
-# =============================================================================
-# CORE CLASSES
-# =============================================================================
 
 class AgentState(TypedDict):
+    """State for the music discovery agent."""
     user_input: str
     intent: str
     sql_query: str
@@ -56,11 +39,47 @@ class AgentState(TypedDict):
     response: str
     query_metadata: Optional[Dict[str, Any]]
 
+
+# Utility functions
+def format_number(num: int, suffix: str) -> str:
+    """Format large numbers with K/M suffixes."""
+    if num >= 1000000:
+        return f"{num/1000000:.1f}M {suffix}"
+    elif num >= 1000:
+        return f"{num/1000:.0f}K {suffix}"
+    else:
+        return f"{num:,} {suffix}"
+
+
+def format_play_count(playcount: int) -> str:
+    """Format play count for display."""
+    return f"{playcount/1000:.0f}K" if playcount >= 1000 else str(playcount)
+
+
+def clean_bio_text(bio: str) -> str:
+    """Clean HTML and limit bio to 3 sentences."""
+    bio_clean = re.sub(r'<[^>]+>', '', bio.strip())
+    bio_clean = re.sub(r'^\d+\.\s*', '', bio_clean)
+    sentences = bio_clean.split('.')
+    return '. '.join(sentences[:3]) + '.' if len(sentences) > 3 else bio_clean
+
+
+def get_match_rating(match_score: float) -> str:
+    """Convert similarity score to rating."""
+    if match_score >= 0.8: return "(Very High Match)"
+    elif match_score >= 0.6: return "(High Match)"
+    elif match_score >= 0.4: return "(Good Match)"
+    else: return "(Similar)"
+
+
 class DatabaseManager:
+    """Handles database connections and queries."""
+    
     def __init__(self, db_path: str):
         self.db_path = db_path
     
     def execute_query(self, sql_query: str) -> List[Dict]:
+        """Execute SQL query and return results."""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
@@ -72,529 +91,509 @@ class DatabaseManager:
             return []
 
 
-class PatternBasedClassifier:
-    """Simple, fast pattern-based intent classification"""
+class AIClassifier:
+    """AI-powered intent classifier using sentence transformers."""
     
     def __init__(self):
-        self.classification_patterns = {
+        print("Loading AI model for intent classification...")
+        self.model = SentenceTransformer('all-MiniLM-L6-v2')
+        
+        # Training examples for each intent
+        self.training_examples = {
             "listening_stats": [
-                "my top", "my most", "show me my", "my listening", "my statistics", 
-                "my personal", "my history", "give my", "top artists", "top tracks", 
-                "top songs", "top albums", "my favorites", "what I listen to",
-                "my music", "show me popular"
+                "show me my top artists", "what are my most played songs",
+                "my listening history", "top tracks this month", "my favorite albums",
+                "what music do I listen to", "my top artists overall",
+                "show me my tracks", "my music statistics", "top songs last week",
+                "my artists", "my albums", "show me albums", "my tracks",
+                "top artists 7day", "top songs 1month", "albums 3month"
             ],
             "artist_info": [
-                "tell me about", "who is", "information about", "biography for",
-                "what do you know about", "describe", "background on"
+                "tell me about radiohead", "who is bob dylan", 
+                "information about the beatles", "describe this artist",
+                "what do you know about nirvana", "artist biography",
+                "background on this band", "who are the rolling stones",
+                "tell me about", "information about", "who is"
             ],
             "recommend_music": [
-                "recommend", "suggest", "discover", "find artists", "similar to", 
-                "music like", "artists like", "mood", "energetic", "new sounds",
-                "something", "find me"
+                "find artists similar to radiohead", "recommend music like jazz",
+                "suggest artists", "music like the beatles", "discover new music",
+                "artists similar to", "find me something like", "recommendations",
+                "similar to", "artists like", "find artists", "suggest"
             ]
         }
+        
+        # Pre-compute embeddings for each intent
+        print("Computing semantic embeddings...")
+        self.intent_embeddings = {}
+        for intent, examples in self.training_examples.items():
+            embeddings = self.model.encode(examples)
+            self.intent_embeddings[intent] = np.mean(embeddings, axis=0)
+        
+        print("AI classifier ready! 🤖")
     
     def classify(self, user_input: str) -> str:
-        """Classify user intent using pattern matching"""
-        query_lower = user_input.lower()
+        """Classify user input into intent category."""
+        input_embedding = self.model.encode([user_input])
         
-        # Check patterns in order of specificity
-        for intent, phrases in self.classification_patterns.items():
-            if any(phrase in query_lower for phrase in phrases):
-                print(f"  Pattern match: {intent}")
-                return intent
+        similarities = {}
+        for intent, intent_embedding in self.intent_embeddings.items():
+            similarity = cosine_similarity(input_embedding, [intent_embedding])[0][0]
+            similarities[intent] = similarity
         
-        # Default fallback for unmatched queries
-        print(f"  No pattern match - defaulting to recommend_music")
-        return "recommend_music"
+        return max(similarities, key=similarities.get)
 
 
-class SimpleTextGenerator:
-    def __init__(self, generator):
-        self.generator = generator
+class FastEntityExtractor:
+    """Fast entity extraction using sentence transformers + simple patterns."""
     
-    def invoke(self, prompt_text: str) -> str:
-        try:
-            responses = self.generator(
-                prompt_text,
-                max_new_tokens=80,           
-                min_length=12,               
-                do_sample=True,
-                temperature=0.8,             
-                top_p=0.85,                  
-                top_k=35,                    
-                repetition_penalty=1.2,     
-                length_penalty=1.0,
-                return_full_text=False,
-                clean_up_tokenization_spaces=True,
-                pad_token_id=self.generator.tokenizer.eos_token_id
-            )
-            
-            if not responses:
-                return None
-            
-            response = responses[0]['generated_text'].strip()
-            
-            # Quality check
-            if len(response) < 8 or self._is_poor_quality(response): 
-                return None
-                
-            return response
-            
-        except Exception as e:
-            print(f"Generation error: {e}")
-            return None
+    def __init__(self, model: SentenceTransformer):
+        print("Setting up fast entity extraction...")
+        self.model = model
+        
+        # Semantic examples for time periods
+        self.time_examples = {
+            "7day": ["last week", "past week", "7 days", "recent week", "this week"],
+            "1month": ["last month", "past month", "this month", "recent month"],
+            "3month": ["3 months", "three months", "quarter", "past 3 months"],
+            "6month": ["6 months", "six months", "half year", "past 6 months"], 
+            "12month": ["year", "12 months", "past year", "last year", "annual"],
+            "overall": ["all time", "overall", "total", "everything", "lifetime"]
+        }
+        
+        # Semantic examples for content types
+        self.content_examples = {
+            "artists": ["artists", "bands", "musicians", "performers"],
+            "tracks": ["songs", "tracks", "music", "tunes"],
+            "albums": ["albums", "records", "releases"]
+        }
+        
+        # Pre-compute embeddings for fast lookup
+        self._setup_embeddings()
+        print("Fast entity extractor ready! ⚡")
     
-    def _is_poor_quality(self, response: str) -> bool:
-        poor_indicators = [
-            "here are your music results",
-            "give a friendly",
-            response.count(" ") < 2,
-            len(set(response.split())) < 2
+    def _setup_embeddings(self):
+        """Pre-compute embeddings for semantic matching."""
+        self.time_embeddings = {}
+        for period, examples in self.time_examples.items():
+            embeddings = self.model.encode(examples)
+            self.time_embeddings[period] = np.mean(embeddings, axis=0)
+        
+        self.content_embeddings = {}
+        for content_type, examples in self.content_examples.items():
+            embeddings = self.model.encode(examples)
+            self.content_embeddings[content_type] = np.mean(embeddings, axis=0)
+    
+    def extract_entities(self, user_input: str) -> Dict[str, Any]:
+        """Extract entities using fast AI + regex patterns."""
+        return {
+            "artist_name": self._extract_artist_name(user_input),
+            "time_period": self._extract_time_period_semantic(user_input),
+            "content_type": self._extract_content_type_semantic(user_input)
+        }
+    
+    def _extract_artist_name(self, text: str) -> Optional[str]:
+        """Extract artist name using regex patterns."""
+        patterns = [
+            # Artist info patterns
+            r'(?:tell me about|who is|about|information about)\s+(.+?)(?:[?.!]|$)',
+            
+            # Similarity patterns  
+            r'(?:similar to|like|artists like|music like|find artists like)\s+(.+?)(?:[?.!]|$)',
+            r'(?:find|recommend|suggest).*?(?:similar.*to|like)\s+(.+?)(?:[?.!]|$)',
         ]
-        return any(indicator for indicator in poor_indicators)
-
-
-class SQLGenerator:
-    def __init__(self):
-        self.cache = {}
-        self.query_history = []
-    
-    def _get_cached_or_generate(self, cache_key: str, generator_func) -> Tuple[str, Dict[str, Any]]:
-        if cache_key in self.cache:
-            sql, metadata = self.cache[cache_key]
-            print(f"  Using cached query: {metadata.get('query_type', 'unknown')}")
-            return sql, metadata
-        
-        sql, metadata = generator_func()
-        metadata["timestamp"] = datetime.now().isoformat()
-        self.cache[cache_key] = (sql, metadata)
-        self.query_history.append({"sql": sql, "metadata": metadata})
-        
-        return sql, metadata
-    
-    def generate_artist_sql(self, user_input: str) -> Tuple[str, Dict[str, Any]]:
-        cache_key = f"artist_{hash(user_input.lower())}"
-        
-        def _generate():
-            artist_name = self._extract_entity(user_input, "artist")
-            
-            if artist_name:
-                sql = f"""
-                    SELECT name, bio_summary, listeners, playcount 
-                    FROM artists 
-                    WHERE LOWER(name) LIKE LOWER('%{artist_name}%') 
-                    LIMIT 5
-                """
-                metadata = {"query_type": f"artist_info_{artist_name}"}
-            else:
-                sql = ""
-                metadata = {"query_type": "artist_info_no_match", "error": "No specific artist found"}
-            
-            return sql, metadata
-        
-        return self._get_cached_or_generate(cache_key, _generate)
-    
-    def generate_recommendation_sql(self, user_input: str) -> Tuple[str, Dict[str, Any]]:
-        cache_key = f"recommend_{hash(user_input.lower())}"
-        
-        def _generate():
-            artist_name = self._extract_entity(user_input, "similarity")
-            
-            if artist_name:
-                sql = f"""
-                    SELECT a2.name as similar_artist, ars.match_score 
-                    FROM artists a1 
-                    JOIN artist_similar ars ON a1.artist_id = ars.artist_id 
-                    JOIN artists a2 ON ars.similar_artist_id = a2.artist_id 
-                    WHERE LOWER(a1.name) LIKE LOWER('%{artist_name}%') 
-                    ORDER BY ars.match_score DESC LIMIT 10
-                """
-                metadata = {"query_type": f"recommend_similar_{artist_name}"}
-            else:
-                sql = ""
-                metadata = {"query_type": "recommend_no_match", "error": "No target artist found for recommendations"}
-            
-            return sql, metadata
-        
-        return self._get_cached_or_generate(cache_key, _generate)
-    
-    def generate_stats_sql(self, user_input: str) -> Tuple[str, Dict[str, Any]]:
-        cache_key = f"stats_{hash(user_input.lower())}"
-        
-        def _generate():
-            content_type = self._extract_content_type(user_input)
-            time_period = self._extract_time_period(user_input)
-            
-            if content_type == "tracks":
-                sql = f"""
-                    SELECT t.name, ar.name as artist_name, utt.playcount 
-                    FROM user_top_tracks utt 
-                    JOIN tracks t ON utt.track_id = t.track_id 
-                    JOIN artists ar ON t.artist_id = ar.artist_id
-                    WHERE utt.time_period = '{time_period}'
-                    ORDER BY utt.playcount DESC LIMIT 10
-                """
-            elif content_type == "albums":
-                sql = f"""
-                    SELECT a.name, ar.name as artist_name, uta.playcount 
-                    FROM user_top_albums uta 
-                    JOIN albums a ON uta.album_id = a.album_id 
-                    JOIN artists ar ON a.artist_id = ar.artist_id
-                    WHERE uta.time_period = '{time_period}'
-                    ORDER BY uta.playcount DESC LIMIT 10
-                """
-            else:  # artists
-                sql = f"""
-                    SELECT a.name, uta.playcount 
-                    FROM user_top_artists uta 
-                    JOIN artists a ON uta.artist_id = a.artist_id 
-                    WHERE uta.time_period = '{time_period}'
-                    ORDER BY uta.playcount DESC LIMIT 10
-                """
-            
-            metadata = {"query_type": f"listening_stats_{content_type}_{time_period}"}
-            return sql, metadata
-        
-        return self._get_cached_or_generate(cache_key, _generate)
-    
-    def _extract_entity(self, text: str, extraction_type: str) -> str:
-        text = text.lower()
-        patterns = ARTIST_PATTERNS if extraction_type == "artist" else SIMILARITY_PATTERNS
-        cleanup_pattern = CLEANUP_WORDS[extraction_type]
         
         for pattern in patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
                 candidate = match.group(1).strip()
-                candidate = re.sub(cleanup_pattern, '', candidate, flags=re.IGNORECASE).strip()
+                
+                # Cleanup - remove obvious non-artist words at the end
+                candidate = re.sub(r'\s+(artist|band|musician|group)$', '', 
+                                 candidate, flags=re.IGNORECASE).strip()
+                
                 if candidate and len(candidate) > 1:
                     return candidate
         
         return None
     
-    def _extract_content_type(self, text: str) -> str:
-        text = text.lower()
-        for content_type, keywords in CONTENT_TYPE_KEYWORDS.items():
-            if any(word in text for word in keywords):
-                return content_type
-        return "artists"
+    def _extract_time_period_semantic(self, text: str) -> str:
+        """Extract time period using semantic similarity."""
+        # First check for exact matches (fastest)
+        text_lower = text.lower()
+        for period in TIME_PERIODS:
+            if period in text_lower:
+                return period
+        
+        # Then use semantic matching
+        input_embedding = self.model.encode([text])
+        
+        best_score = 0
+        best_period = "overall"
+        
+        for period, period_embedding in self.time_embeddings.items():
+            similarity = cosine_similarity(input_embedding, [period_embedding])[0][0]
+            
+            if similarity > best_score:
+                best_score = similarity
+                best_period = period
+        
+        # Only return non-default if confidence is reasonable
+        return best_period if best_score > 0.3 else "overall"
     
-    def _extract_time_period(self, text: str) -> str:
-        text = text.lower()
-        for time_period in TIME_PERIODS:
-            if time_period in text:
-                return time_period
-        return "overall"
+    def _extract_content_type_semantic(self, text: str) -> str:
+        """Extract content type using semantic similarity."""
+        # First check for exact matches (fastest)
+        text_lower = text.lower()
+        if any(word in text_lower for word in ["song", "songs", "track", "tracks"]):
+            return "tracks"
+        elif any(word in text_lower for word in ["album", "albums"]):
+            return "albums"
+        
+        # Then use semantic matching
+        input_embedding = self.model.encode([text])
+        
+        best_score = 0
+        best_type = "artists"
+        
+        for content_type, content_embedding in self.content_embeddings.items():
+            similarity = cosine_similarity(input_embedding, [content_embedding])[0][0]
+            
+            if similarity > best_score:
+                best_score = similarity
+                best_type = content_type
+        
+        # Only return non-default if confidence is reasonable
+        return best_type if best_score > 0.3 else "artists"
+
+
+class SQLGenerator:
+    """Generates SQL queries using pre-extracted entities."""
     
-    def get_cache_stats(self) -> Dict[str, int]:
-        return {"total_cache_entries": len(self.cache), "total_queries": len(self.query_history)}
+    def generate_artist_sql(self, entities: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        """Generate SQL for artist information using extracted entities."""
+        artist_name = entities["artist_name"]
+        
+        if artist_name:
+            sql = f"""
+                SELECT name, bio_summary, listeners, playcount 
+                FROM artists 
+                WHERE LOWER(name) LIKE LOWER('%{artist_name}%') 
+                LIMIT 5
+            """
+            metadata = {"query_type": f"artist_info_{artist_name}"}
+        else:
+            sql = ""
+            metadata = {"error": "No artist found"}
+        return sql, metadata
+    
+    def generate_recommendation_sql(self, entities: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        """Generate SQL for music recommendations using extracted entities."""
+        artist_name = entities["artist_name"]
+        
+        if artist_name:
+            sql = f"""
+                SELECT a2.name as similar_artist, ars.match_score 
+                FROM artists a1 
+                JOIN artist_similar ars ON a1.artist_id = ars.artist_id 
+                JOIN artists a2 ON ars.similar_artist_id = a2.artist_id 
+                WHERE LOWER(a1.name) LIKE LOWER('%{artist_name}%') 
+                ORDER BY ars.match_score DESC LIMIT 10
+            """
+            metadata = {"query_type": f"recommend_similar_{artist_name}"}
+        else:
+            sql = ""
+            metadata = {"error": "No target artist found"}
+        return sql, metadata
+    
+    def generate_stats_sql(self, entities: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        """Generate SQL for listening statistics using extracted entities."""
+        content_type = entities["content_type"]
+        time_period = entities["time_period"]
+        
+        # Map content types to table info
+        table_map = {
+            "tracks": ("user_top_tracks", "tracks", "track_id", "t"),
+            "albums": ("user_top_albums", "albums", "album_id", "a"),
+            "artists": ("user_top_artists", "artists", "artist_id", "a")
+        }
+        
+        user_table, item_table, id_field, alias = table_map[content_type]
+        
+        if content_type == "artists":
+            sql = f"""
+                SELECT {alias}.name, u.playcount 
+                FROM {user_table} u 
+                JOIN {item_table} {alias} ON u.artist_id = {alias}.artist_id 
+                WHERE u.time_period = '{time_period}'
+                ORDER BY u.playcount DESC LIMIT 10
+            """
+        else:
+            sql = f"""
+                SELECT {alias}.name, ar.name as artist_name, u.playcount 
+                FROM {user_table} u 
+                JOIN {item_table} {alias} ON u.{id_field} = {alias}.{id_field} 
+                JOIN artists ar ON {alias}.artist_id = ar.artist_id
+                WHERE u.time_period = '{time_period}'
+                ORDER BY u.playcount DESC LIMIT 10
+            """
+        
+        metadata = {"query_type": f"listening_stats_{content_type}_{time_period}"}
+        return sql, metadata
 
 
 class ResponseGenerator:
-    def __init__(self, text_generator: SimpleTextGenerator):
-        self.text_generator = text_generator
-        self.response_history = []
-        self.user_preferences = {}
+    """Generates formatted responses."""
     
     def generate_response(self, state: AgentState) -> str:
+        """Generate response based on intent and results."""
         if not state["results"]:
-            return self._handle_empty_results(state)
-        
-        unique_results = self._remove_duplicates(state["results"])
-        formatted_results = self._format_results(unique_results, state["intent"])
-        
-        completion_prompt = self._create_completion_prompt(
-            state["intent"], 
-            formatted_results, 
-            state["user_input"]
-        )
-        
-        response = self._try_llm_generation(completion_prompt)
-        
-        if not response:
-            response = self._template_fallback(state["intent"], formatted_results)
-        
-        self._track_response(state, response)
-        return response
-    
-    def _create_completion_prompt(self, intent: str, formatted_results: str, user_input: str) -> str:
-        if intent == "artist_info":
-            artist_name = formatted_results.split(':')[0].split('(')[0].strip()
-            
-            if ':' in formatted_results:
-                return f"I found {artist_name} in your music library. {artist_name} is"
-            else:
-                return f"I found {artist_name} with music in your collection. This artist is known for"
-        
-        elif intent == "listening_stats":
-            if "7day" in user_input or "week" in user_input:
-                return f"Looking at your recent listening, your top music is {formatted_results}. This week you've been enjoying"
-            elif "overall" in user_input:
-                return f"Your all-time favorites include {formatted_results}. Your music taste shows you really love"
-            else:
-                return f"Your music listening shows {formatted_results}. This indicates that you tend to enjoy"
-        
-        elif intent == "recommend_music":
-            if "similarity" in formatted_results:
-                return f"Based on your taste, I recommend {formatted_results}. These artists are worth exploring because they"
-            else:
-                return f"I suggest checking out {formatted_results}. You might enjoy them since they"
-        
-        return f"Looking at your music data: {formatted_results}. This shows"
-    
-    def _template_fallback(self, intent: str, formatted_results: str) -> str:
-        templates = {
-            "artist_info": f"I found {formatted_results} in your music library!",
-            "listening_stats": f"Here's what you've been listening to: {formatted_results}",
-            "recommend_music": f"I recommend: {formatted_results}"
-        }
-        return templates.get(intent, f"Results: {formatted_results}")
-
-    def _try_llm_generation(self, prompt: str) -> str:
-        try:
-            response = self.text_generator.invoke(prompt)
-            if response and len(response.strip()) >= 10:
-                return response.strip()
-        except Exception as e:
-            print(f"LLM generation failed: {e}")
-        return None
-    
-    def _handle_empty_results(self, state: AgentState) -> str:
-        metadata = state.get("query_metadata", {})
-        error = metadata.get("error", "")
-        
-        if "no specific artist found" in error.lower():
-            return "I couldn't identify a specific artist. Please specify an artist name."
-        
-        if "no target artist found" in error.lower():
-            return "Please specify which artist you want recommendations for."
-        
-        if (state["intent"] == "recommend_music" and 
-            metadata.get("query_type", "").startswith("recommend_similar_")):
-            artist = metadata.get("query_type", "").replace("recommend_similar_", "")
-            return f"No similarity data found for {artist} in your library."
-        
-        return {
-            "artist_info": "I couldn't find that artist in your library.",
-            "listening_stats": "I couldn't find listening data for that request.",
-            "recommend_music": "Please specify an artist for recommendations."
-        }.get(state["intent"], "I couldn't understand your request.")
-    
-    def _remove_duplicates(self, results: List[Dict]) -> List[Dict]:
-        seen, unique = set(), []
-        for result in results:
-            name = result.get('name', 'Unknown')
-            if name not in seen:
-                seen.add(name)
-                unique.append(result)
-        return unique
-    
-    def _format_results(self, results: List[Dict], intent: str) -> str:
-        if intent == "artist_info":
-            result = results[0]
-            name = result.get('name', 'Unknown')
-            bio = result.get('bio_summary', '').strip()
-            playcount = result.get('playcount', 0)
-            
-            if bio:
-                bio_text = bio[:100] + "..." if len(bio) > 100 else bio
-                return f"{name}: {bio_text}" + (f" ({playcount:,} plays)" if playcount else "")
-            return f"{name}" + (f" ({playcount:,} plays)" if playcount else "")
-        
-        formatted = []
-        for result in results[:3]:
-            if 'similar_artist' in result:
-                name = result.get('similar_artist', 'Unknown')
-                score = result.get('match_score', 0)
-                formatted.append(f"{name} (similarity: {score:.2f})")
-            else:
-                name = result.get('name', 'Unknown')
-                artist_name = result.get('artist_name', '')
-                count = result.get('playcount', 0)
-                
-                display_name = f"{name} by {artist_name}" if artist_name else name
-                formatted.append(f"{display_name} ({count:,} plays)" if count else display_name)
-        
-        return ", ".join(formatted)
-    
-    def _track_response(self, state: AgentState, response: str) -> None:
-        self.response_history.append({
-            "user_input": state["user_input"],
-            "intent": state["intent"],
-            "response": response,
-            "timestamp": datetime.now().isoformat()
-        })
+            return self._handle_no_results(state["intent"], state.get("query_metadata", {}))
         
         intent = state["intent"]
-        if intent not in self.user_preferences:
-            self.user_preferences[intent] = {"count": 0}
-        self.user_preferences[intent]["count"] += 1
-    
-    def get_user_preferences(self) -> Dict[str, Any]:
-        return self.user_preferences
-
-# =============================================================================
-# SETUP FUNCTION  
-# =============================================================================
-
-def setup_llm() -> SimpleTextGenerator:
-    """Setup only the text generation model (no classification model needed)"""
-    if not TRANSFORMERS_AVAILABLE:
-        print("Transformers not available")
-        raise ImportError("Transformers library is required")
-    
-    try:
-        print("Loading text generation model...")
-        generator = pipeline("text-generation", model="distilgpt2", max_length=150, pad_token_id=50256)
-        generation_llm = SimpleTextGenerator(generator)
-        print("Text generation model loaded successfully")
+        results = state["results"]
         
-        return generation_llm
-    except Exception as e:
-        print(f"Model loading failed: {e}")
-        raise RuntimeError(f"Failed to load text generation model: {e}")
+        if intent == "artist_info":
+            return self._format_artist_info(results[0])
+        elif intent == "listening_stats":
+            return self._format_listening_stats(results, state.get("query_metadata", {}))
+        elif intent == "recommend_music":
+            return self._format_recommendations(results, state.get("query_metadata", {}))
+        
+        return f"Found {len(results)} results."
+    
+    def _format_artist_info(self, artist: Dict[str, Any]) -> str:
+        """Format artist information response."""
+        name = artist.get('name', 'Unknown Artist')
+        bio = artist.get('bio_summary', '')
+        listeners = artist.get('listeners', 0)
+        playcount = artist.get('playcount', 0)
+        
+        response = f"**{name}**\n\n"
+        
+        if bio and len(bio.strip()) > 10:
+            bio_display = clean_bio_text(bio)
+            response += f"{bio_display}\n\n"
+        
+        # Format stats
+        stats = []
+        if listeners > 0:
+            stats.append(format_number(listeners, "listeners"))
+        if playcount > 0:
+            stats.append(format_number(playcount, "plays"))
+        
+        if stats:
+            response += f"Stats: {' • '.join(stats)}"
+        
+        return response
+    
+    def _format_listening_stats(self, results: List[Dict], metadata: Dict) -> str:
+        """Format listening statistics response."""
+        query_type = metadata.get('query_type', '')
+        
+        # Extract content type and time period
+        content_type = "artists"
+        if 'tracks' in query_type:
+            content_type = "tracks"
+        elif 'albums' in query_type:
+            content_type = "albums"
+        
+        time_period = next((p for p in TIME_PERIODS if p in query_type), "overall")
+        time_display = TIME_DISPLAY.get(time_period, time_period)
+        
+        response = f"**Your top {content_type} ({time_display}):**\n\n"
+        
+        for i, item in enumerate(results[:10], 1):
+            name = item.get('name', 'Unknown')
+            playcount = item.get('playcount', 0)
+            
+            # Add artist name for tracks/albums
+            if content_type in ['tracks', 'albums'] and 'artist_name' in item:
+                artist = item.get('artist_name', '')
+                if artist:
+                    name = f"{name} by {artist}"
+            
+            play_str = format_play_count(playcount)
+            response += f"{i:2d}. {name} ({play_str} plays)\n"
+        
+        total_plays = sum(item.get('playcount', 0) for item in results)
+        response += f"\nTotal: {total_plays:,} plays"
+        
+        return response
+    
+    def _format_recommendations(self, results: List[Dict], metadata: Dict) -> str:
+        """Format recommendations response."""
+        query_type = metadata.get('query_type', '')
+        target_artist = "that artist"
+        
+        if 'recommend_similar_' in query_type:
+            target_artist = query_type.replace('recommend_similar_', '').replace('_', ' ').title()
+        
+        response = f"**Artists similar to {target_artist}:**\n\n"
+        
+        if not results:
+            return f"No similar artists found for {target_artist} in your database."
+        
+        for i, item in enumerate(results[:8], 1):
+            artist_name = item.get('similar_artist', item.get('name', 'Unknown'))
+            match_score = item.get('match_score', 0)
+            rating = get_match_rating(match_score)
+            response += f"{i}. {artist_name} {rating}\n"
+        
+        response += f"\nFound {len(results)} similar artists in your database"
+        return response
+    
+    def _handle_no_results(self, intent: str, metadata: Dict) -> str:
+        """Handle cases where no results were found."""
+        error_messages = {
+            "artist_info": "That artist wasn't found in your music database.",
+            "listening_stats": "No listening statistics found for that time period.",
+            "recommend_music": "No similar artists found in your database."
+        }
+        
+        error = metadata.get('error', '')
+        if "No artist found" in error or "No target artist found" in error:
+            example = "Radiohead" if intent != "listening_stats" else "my top artists"
+            return f"I couldn't identify the artist. Try: '{example}'"
+        
+        return error_messages.get(intent, "No results found.")
 
-
-# =============================================================================
-# MAIN AGENT CLASS
-# =============================================================================
 
 class MusicDiscoveryAgent:
+    """Main agent."""
+    
     def __init__(self, db_manager: DatabaseManager):
         self.db_manager = db_manager
-        self.classifier = PatternBasedClassifier()
-        self.generation_llm = setup_llm()
+        self.classifier = AIClassifier()
+        self.entity_extractor = FastEntityExtractor(self.classifier.model)  # Reuse same SentenceTransformer model
+        self.response_generator = ResponseGenerator()
         self.sql_generator = SQLGenerator()
-        self.response_generator = ResponseGenerator(self.generation_llm)
         self.session_history = []
         self.graph = self._create_graph()
     
-    def _create_graph(self) -> Any:
+    def _create_graph(self):
+        """Create the workflow graph with proper node separation."""
         graph = StateGraph(AgentState)
         
-        graph.add_node("classify_intent", self._classify_intent)
-        graph.add_node("get_bio_info", self._generate_artist_sql)
-        graph.add_node("get_recommendation", self._generate_recommendation_sql)
-        graph.add_node("describe_my_listening", self._generate_stats_sql)
-        graph.add_node("execute_sql_query", self._execute_query)
-        graph.add_node("generate_response", self._generate_response)
+        # Add all the workflow nodes
+        nodes = [
+            ("classify_intent", self._classify_intent),
+            ("extract_entities", self._extract_entities),
+            ("get_bio_info", self._generate_artist_sql),
+            ("get_recommendation", self._generate_recommendation_sql),
+            ("describe_my_listening", self._generate_stats_sql),
+            ("execute_sql_query", self._execute_query),
+            ("generate_response", self._generate_response)
+        ]
         
+        for name, func in nodes:
+            graph.add_node(name, func)
+        
+        # Connect the nodes
         graph.add_edge(START, "classify_intent")
+        graph.add_edge("classify_intent", "extract_entities")
         graph.add_conditional_edges(
-            "classify_intent", self._route_sql_type,
-            {"get_bio_info": "get_bio_info", "get_recommendation": "get_recommendation", "describe_my_listening": "describe_my_listening"}
+            "extract_entities", self._route_sql_type,
+            {"get_bio_info": "get_bio_info", 
+             "get_recommendation": "get_recommendation", 
+             "describe_my_listening": "describe_my_listening"}
         )
-        graph.add_edge("get_bio_info", "execute_sql_query")
-        graph.add_edge("get_recommendation", "execute_sql_query")
-        graph.add_edge("describe_my_listening", "execute_sql_query")
+        
+        for node in ["get_bio_info", "get_recommendation", "describe_my_listening"]:
+            graph.add_edge(node, "execute_sql_query")
+        
         graph.add_edge("execute_sql_query", "generate_response")
         graph.add_edge("generate_response", END)
         
         return graph.compile()
     
     def _classify_intent(self, state: AgentState) -> AgentState:
-        try:
-            state["intent"] = self.classifier.classify(state["user_input"])
-        except Exception as e:
-            print(f"Intent classification error: {e}")
-            state["intent"] = "recommend_music"
+        """Classify the user's intent using SentenceTransformer semantic similarity."""
+        state["intent"] = self.classifier.classify(state["user_input"])
+        return state
+    
+    def _extract_entities(self, state: AgentState) -> AgentState:
+        """Extract entities using hybrid approach: regex for artists, SentenceTransformer for time/content."""
+        entities = self.entity_extractor.extract_entities(state["user_input"])
+        # Store entities in query_metadata for later use
+        state["query_metadata"] = {"entities": entities}
         return state
     
     def _route_sql_type(self, state: AgentState) -> str:
+        """Route to the right SQL generator based on intent."""
         routing = {"artist_info": "get_bio_info", "listening_stats": "describe_my_listening"}
         return routing.get(state["intent"], "get_recommendation")
     
     def _generate_artist_sql(self, state: AgentState) -> AgentState:
-        sql, metadata = self.sql_generator.generate_artist_sql(state["user_input"])
+        """Generate SQL for artist queries."""
+        entities = state["query_metadata"]["entities"]
+        sql, metadata = self.sql_generator.generate_artist_sql(entities)
         state["sql_query"] = sql
-        state["query_metadata"] = metadata
+        # Merge metadata
+        state["query_metadata"].update(metadata)
         return state
     
     def _generate_recommendation_sql(self, state: AgentState) -> AgentState:
-        sql, metadata = self.sql_generator.generate_recommendation_sql(state["user_input"])
+        """Generate SQL for recommendation queries."""
+        entities = state["query_metadata"]["entities"]
+        sql, metadata = self.sql_generator.generate_recommendation_sql(entities)
         state["sql_query"] = sql
-        state["query_metadata"] = metadata
+        # Merge metadata
+        state["query_metadata"].update(metadata)
         return state
     
     def _generate_stats_sql(self, state: AgentState) -> AgentState:
-        sql, metadata = self.sql_generator.generate_stats_sql(state["user_input"])
+        """Generate SQL for stats queries."""
+        entities = state["query_metadata"]["entities"]
+        sql, metadata = self.sql_generator.generate_stats_sql(entities)
         state["sql_query"] = sql
-        state["query_metadata"] = metadata
+        # Merge metadata
+        state["query_metadata"].update(metadata)
         return state
     
     def _execute_query(self, state: AgentState) -> AgentState:
+        """Execute the SQL query."""
         try:
-            sql = state["sql_query"]
-            if sql and sql.strip():
-                results = self.db_manager.execute_query(sql)
+            if state["sql_query"]:
+                results = self.db_manager.execute_query(state["sql_query"])
                 state["results"] = results[:10]
             else:
                 state["results"] = []
-                print(f"  No SQL generated - couldn't understand request")
         except Exception as e:
             print(f"Database error: {e}")
             state["results"] = []
         return state
     
     def _generate_response(self, state: AgentState) -> AgentState:
-        try:
-            state["response"] = self.response_generator.generate_response(state)
-        except Exception as e:
-            print(f"Response generation error: {e}")
-            state["response"] = "I found some music information for you!"
+        """Generate the final response."""
+        state["response"] = self.response_generator.generate_response(state)
         return state
     
     def process_query(self, user_input: str) -> Dict[str, Any]:
+        """Process a user query and return the result."""
         state = {
-            "user_input": user_input, 
-            "intent": "", 
-            "sql_query": "", 
+            "user_input": user_input,
+            "intent": "",
+            "sql_query": "",
             "results": [],
-            "response": "", 
+            "response": "",
             "query_metadata": {}
         }
         
         try:
             final_state = self.graph.invoke(state)
             self.session_history.append({
-                "user_input": user_input, 
+                "user_input": user_input,
                 "intent": final_state["intent"],
-                "response": final_state["response"], 
+                "response": final_state["response"],
                 "timestamp": datetime.now().isoformat()
             })
             return final_state
         except Exception as e:
-            print(f"Error processing query: {e}")
-            return {**state, "response": "Sorry, I encountered an error processing your request."}
-    
-    def get_session_stats(self) -> Dict[str, Any]:
-        intent_dist = {}
-        for entry in self.session_history:
-            if "intent" in entry:
-                intent = entry["intent"]
-                intent_dist[intent] = intent_dist.get(intent, 0) + 1
-        
-        return {
-            "total_queries": len(self.session_history),
-            "sql_cache_stats": self.sql_generator.get_cache_stats(),
-            "user_preferences": self.response_generator.get_user_preferences(),
-            "intent_distribution": intent_dist
-        }
-    
-    def clear_session(self) -> None:
-        self.session_history.clear()
-        if hasattr(self.sql_generator, 'cache'):
-            self.sql_generator.cache.clear()
-        if hasattr(self.response_generator, 'response_history'):
-            self.response_generator.response_history.clear()
-        print("Session cleared")
+            print(f"Error: {e}")
+            return {**state, "response": "Sorry, I encountered an error."}
 
-
-# =============================================================================
-# PUBLIC INTERFACES
-# =============================================================================
 
 def create_music_agent(db_path: str) -> MusicDiscoveryAgent:
-    """Create a music discovery agent with database connection."""
+    """Create a music discovery agent."""
     return MusicDiscoveryAgent(DatabaseManager(db_path))
