@@ -54,10 +54,7 @@ class AgentState(TypedDict):
     sql_query: str
     results: List[Dict]
     response: str
-    db_manager: Any
-    agent: Any
     query_metadata: Optional[Dict[str, Any]]
-
 
 class DatabaseManager:
     def __init__(self, db_path: str):
@@ -466,8 +463,8 @@ def setup_llm() -> SimpleTextGenerator:
 class MusicDiscoveryAgent:
     def __init__(self, db_manager: DatabaseManager):
         self.db_manager = db_manager
-        self.classifier = PatternBasedClassifier()  # Simple pattern-based classifier
-        self.generation_llm = setup_llm()  # Only load text generation model
+        self.classifier = PatternBasedClassifier()
+        self.generation_llm = setup_llm()
         self.sql_generator = SQLGenerator()
         self.response_generator = ResponseGenerator(self.generation_llm)
         self.session_history = []
@@ -497,7 +494,6 @@ class MusicDiscoveryAgent:
         return graph.compile()
     
     def _classify_intent(self, state: AgentState) -> AgentState:
-        """Simple pattern-based classification"""
         try:
             state["intent"] = self.classifier.classify(state["user_input"])
         except Exception as e:
@@ -551,15 +547,21 @@ class MusicDiscoveryAgent:
     
     def process_query(self, user_input: str) -> Dict[str, Any]:
         state = {
-            "user_input": user_input, "intent": "", "sql_query": "", "results": [],
-            "response": "", "db_manager": self.db_manager, "agent": self, "query_metadata": {}
+            "user_input": user_input, 
+            "intent": "", 
+            "sql_query": "", 
+            "results": [],
+            "response": "", 
+            "query_metadata": {}
         }
         
         try:
             final_state = self.graph.invoke(state)
             self.session_history.append({
-                "user_input": user_input, "intent": final_state["intent"],
-                "response": final_state["response"], "timestamp": datetime.now().isoformat()
+                "user_input": user_input, 
+                "intent": final_state["intent"],
+                "response": final_state["response"], 
+                "timestamp": datetime.now().isoformat()
             })
             return final_state
         except Exception as e:
@@ -581,9 +583,11 @@ class MusicDiscoveryAgent:
         }
     
     def clear_session(self) -> None:
-        self.session_history = []
-        self.sql_generator = SQLGenerator()
-        self.response_generator = ResponseGenerator(self.generation_llm)
+        self.session_history.clear()
+        if hasattr(self.sql_generator, 'cache'):
+            self.sql_generator.cache.clear()
+        if hasattr(self.response_generator, 'response_history'):
+            self.response_generator.response_history.clear()
         print("Session cleared")
 
 
