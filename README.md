@@ -88,26 +88,24 @@ ERDiagram available here: https://dbdiagram.io/d/last-fm_erdiagram-68a9d7b11e7a6
 
 3. **Run the Analysis**:
     - Execute notebooks in order:
-        1. `notebooks/lastfm_notebook.ipynb`
-        2. `notebooks/EDA_notebook.ipynb` 
-        3. `notebooks/music_discovery_notebook.ipynb` 
+        1. `lastfm_notebook.ipynb`
+        2. `EDA_notebook.ipynb` 
+        3. `music_discovery_notebook.ipynb` 
 
 4. **View Results**:
     - **Data Collection**: 
-      [![View on NBViewer](https://img.shields.io/badge/Data%20Collection-NBViewer-orange?style=for-the-badge&logo=jupyter)](https://nbviewer.org/github/emmenru/last-fm-data/blob/main/notebooks/lastfm_notebook.ipynb)
-      [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/emmenru/last-fm-data/blob/main/notebooks/lastfm_notebook.ipynb)
+      [![View on NBViewer](https://img.shields.io/badge/Data%20Collection-NBViewer-orange?style=for-the-badge&logo=jupyter)](https://nbviewer.org/github/emmenru/last-fm-data/blob/main/lastfm_notebook.ipynb)
+      [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/emmenru/last-fm-data/blob/main/lastfm_notebook.ipynb)
     
     - **EDA Analysis**: 
-      [![View on NBViewer](https://img.shields.io/badge/EDA%20Analysis-NBViewer-orange?style=for-the-badge&logo=jupyter)](https://nbviewer.org/github/emmenru/last-fm-data/blob/main/notebooks/EDA_notebook.ipynb)
-      [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/emmenru/last-fm-data/blob/main/notebooks/EDA_notebook.ipynb)
+      [![View on NBViewer](https://img.shields.io/badge/EDA%20Analysis-NBViewer-orange?style=for-the-badge&logo=jupyter)](https://nbviewer.org/github/emmenru/last-fm-data/blob/main/EDA_notebook.ipynb)
+      [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/emmenru/last-fm-data/blob/main/EDA_notebook.ipynb)
     
     - **AI Music Discovery**: 
-      [![View Music Discovery on NBViewer](https://img.shields.io/badge/Music%20Discovery-NBViewer-orange?style=for-the-badge&logo=jupyter)](https://nbviewer.org/github/emmenru/last-fm-data/blob/main/notebooks/music_discovery_notebook.ipynb)
-      [![Open Music Discovery In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/emmenru/last-fm-data/blob/main/notebooks/music_discovery_notebook.ipynb)
-
+      [![View Music Discovery on NBViewer](https://img.shields.io/badge/Music%20Discovery-NBViewer-orange?style=for-the-badge&logo=jupyter)](https://nbviewer.org/github/emmenru/last-fm-data/blob/main/music_discovery_notebook.ipynb)
+      [![Open Music Discovery In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/emmenru/last-fm-data/blob/main/music_discovery_notebook.ipynb)
+      
 ## Important Notes
-
-### Data Collection Considerations
 - Data collected on 2025-05-08 using Last.fm API (only a snapshot of personal listening history). 
 - Note that all timestamps are in UTC if nothing else is stated (see details in EDA, where labels 'paris' are added when timezone conversion is used - this is done only for table listening_df). 
 - Tracks do not have full album coverage (about 35%). Some tracks do not have detailed meta data (resulting e.g. in duration of 0).
