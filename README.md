@@ -18,10 +18,10 @@ Modern music streaming services are often focused on discovering 'new music' tha
 To create a complete data science pipeline that would allow me to explore my listening habits through interaction using natural language (as opposed to defining multiple SQL queries to do so). 
 
 ### Approach
-- **Data Collection**: Automated scraping of Last.fm data using the official API
+- **Data Collection**: Automated scraping of Last.fm data using the official [Last.fm API](https://www.last.fm/api)
 - **Database Design**: SQL schema design and database creation 
 - **Exploratory Analysis**: Interactive visualizations of listening patterns
-- **AI Agent Development**: Workflow orchestration of simple AI chat interface based on sentence transformer models 
+- **AI Agent Development**: Workflow orchestration of simple AI chat interface based on [Sentence Transformer (SBERT)](https://sbert.net/) models 
 
 ### Findings
 Please refer to step **4. View Results** for interactive exploration of results. 
@@ -48,7 +48,7 @@ Please refer to step **4. View Results** for interactive exploration of results.
   **AI Agent:**
   - **music_discovery_helper.py**: Core AI agent implementation featuring:
     - **SentenceTransformer Integration**: `all-MiniLM-L6-v2` model for semantic understanding (intent classification and entity extraction)
-    - **LangGraph Workflow**: 7-node processing pipeline 
+    - **[LangGraph](https://langchain-ai.github.io/langgraph/) Workflow**: 7-node processing pipeline 
 
 ### Notebooks
   - **EDA_notebook.ipynb**: EDA and interactive Plotly visualizations
