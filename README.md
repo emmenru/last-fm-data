@@ -7,12 +7,12 @@
 4. [Important Notes](#important-notes)
 
 ## Project Overview
-This repository contains code for scraping personal Last.fm profile data, building a SQL database, performing exploratory data analysis, and creating an AI-powered music discovery agent with natural language interface capabilities.
+This repository contains code for scraping personal Last.fm music streaming data, building a SQL database, performing exploratory data analysis, and creating an AI-powered music discovery agent with natural language interface capabilities.
 
 The system supports queries like "tell me about Radiohead", "my top artists last month", "find music like Radiohead" (artist information, listening habits, and music recommendations). 
 
 ### Background
-Modern music streaming services are often focused on discovering 'new music' that you have not listened to before, based on what you have listened to. However, quite often I find that looking back at what I have already listened to (and possibly forgotten about) could actually lead me into more interesting directions for music discovery. 
+Modern music streaming services are often focused on discovering 'new music' that you have not listened to before. However, quite often I find that looking back at what I have already listened to (and possibly forgotten about) could actually lead me into more interesting directions for music discovery. 
 
 ### Aim
 To create a complete data science pipeline that would allow me to explore my listening habits through interaction using natural language (as opposed to defining multiple SQL queries to do so). 
@@ -28,13 +28,11 @@ Please refer to step **4. View Results** for interactive exploration of results.
 
 ## File Descriptions
 
-### Configuration
-- **config/**: 
+### Config
   - **schema.sql**: SQL database schema definitions
   - **config.py**: Configuration for Last.fm data collection
 
 ### Data
-- **data/**: 
   - **lastfm_data.db**: SQLite database (music data snapshot collected 2025-05-08)
   - **collection.log**: Log file
 
@@ -42,8 +40,6 @@ Please refer to step **4. View Results** for interactive exploration of results.
 - Figures (db schema, node graph)
 
 ### Utils
-- **utils/**: 
-
   **Data Collection & Database:**
   - **data_collector.py**: Main data collection orchestration
   - **database_helper.py**: Database operations and SQL query management
@@ -55,13 +51,9 @@ Please refer to step **4. View Results** for interactive exploration of results.
     - **LangGraph Workflow**: 7-node processing pipeline 
 
 ### Notebooks
-- **notebooks/**: 
   - **EDA_notebook.ipynb**: EDA and interactive Plotly visualizations
   - **lastfm_notebook.ipynb**: Workflow for data collection and database setup
   - **music_discovery_notebook.ipynb**: AI-powered music discovery agent with simple chat interface
-
-### Architecture
-- **architecture.png**: Visual diagram of AI agent workflow and system design
 
 ### Database Schema
 
